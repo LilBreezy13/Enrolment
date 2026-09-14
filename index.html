@@ -1788,22 +1788,17 @@ let message = buildMessage(school);
 window.open(`sms:?body=${encodeURIComponent(message)}`);
 }
 
+
+const EXAM_NAME_LABEL = "Beta Mock";
+
 function buildMessage(school){
 
 let ds = document.getElementById("summaryText").dataset;
 
-let invoiceLine = ds.invoiceUrl ? `\n\nInvoice: ${ds.invoiceUrl}` : "";
-
-return `School Name: ${school}
-
-Subtotal: GHS ${ds.subtotal}
-Delivery Fee: GHS ${ds.delivery}
-Total: GHS ${ds.total}
-
-Kindly pay through any this momo lines 
-0247448883 | 0248726958 | 0207732900 (Bacon Atsu Amengor / Best Brain Examinations Konsortium) 
-
-NB: Please use the name of your school as reference when making payments and send us a screenshot for confirmation.${invoiceLine}`;
+return `Dear ${school}
+Your registration for ${EXAM_NAME_LABEL} is successful!
+Total Bill: GHS ${ds.total}
+PAY VIA 0247448883 | 0248726958`;
 }
 
 document.addEventListener("focusin", function(e){
