@@ -1372,7 +1372,7 @@ async function submitEnrollment() {
                summarySection.style.display = "block";
         summarySection.scrollIntoView({ behavior: "smooth" });
 
-        // Start preparing the invoice PDF in the background right away, so it's
+               // Start preparing the invoice PDF in the background right away, so it's
         // usually ready by the time the user taps "Send Bill via WhatsApp".
         // Sharing the actual file requires calling navigator.share() almost
         // immediately after the click, so we can't afford to wait for this
@@ -1380,6 +1380,7 @@ async function submitEnrollment() {
         if (!summaryText.dataset.invoiceUrl) {
             getInvoicePdfUrl();
         }
+        prepareInvoiceFile();
 
         // RESET FORM AFTER SUCCESS
         reloadForm(false);
@@ -1707,51 +1708,78 @@ async function getInvoicePdfUrl(maxWaitMs = 45000, intervalMs = 2500){
     return "";
 }
 
-async function shareWhatsApp(){
+// Pulls the invoice PDF down as base64 over the POST channel and turns it into
+// a File held in memory, ready to hand straight to navigator.share(). This runs
+// in the background from the moment the summary appears, because the share call
+// itself can't afford to await anything (see shareWhatsApp below).
+window.pendingInvoiceFile = null;
+
+async function prepareInvoiceFile(maxWaitMs = 60000, intervalMs = 3000){
+    window.pendingInvoiceFile = null;
+
+    const ds = document.getElementById("summaryText").dataset;
+    const submissionId = ds.submissionId;
+    const token = localStorage.getItem("token");
+    if(!submissionId || !token) return;
+
+    const started = Date.now();
+
+    while(Date.now() - started < maxWaitMs){
+        try{
+            const res = await fetch(API_URL, {
+                method: "POST",
+                headers: { "Content-Type": "text/plain;charset=utf-8" },
+                body: JSON.stringify({ action: "getInvoicePdf", token, submissionId })
+            });
+            const data = await res.json();
+
+            if(data.status === "ok" && data.ready && data.base64){
+                const chars = atob(data.base64);
+                const bytes = new Uint8Array(chars.length);
+                for(let i = 0; i < chars.length; i++) bytes[i] = chars.charCodeAt(i);
+
+                window.pendingInvoiceFile = new File(
+                    [bytes],
+                    `Invoice - ${ds.school || "School"}.pdf`,
+                    { type: "application/pdf" }
+                );
+                return;
+            }
+        }catch(err){
+            // transient network hiccup — just retry
+        }
+        await new Promise(r => setTimeout(r, intervalMs));
+    }
+}
+
+function shareWhatsApp(){
 
 const ds = document.getElementById("summaryText").dataset;
-let school = ds.school;
-let message = buildMessage(school);
+const school = ds.school;
+const message = buildMessage(school);
 
-// IMPORTANT: navigator.share() must fire almost immediately after the click,
-// or the browser treats it as no longer "user initiated" and silently fails,
-// which is why the app used to always fall back to a text-only link. So we
-// never poll/wait here — the PDF was already being prepared in the
-// background since the summary was shown (see the getInvoicePdfUrl() call
-// right after summarySection.scrollIntoView).
-const invoiceUrl = ds.invoiceUrl;
+// No awaits before navigator.share(). The browser only allows a share while
+// the click's transient activation is alive, and awaiting a fetch here burns
+// it — that's why this used to silently fall back to a text-only link even
+// when the PDF fetch succeeded. The File was built ahead of time by
+// prepareInvoiceFile(), which started as soon as the summary was shown.
+const file = window.pendingInvoiceFile;
 
-if(!invoiceUrl){
-    showToast("Invoice is still being prepared — try again in a few seconds to attach the PDF.");
-    window.open(`https://wa.me/?text=${encodeURIComponent(message)}`);
+if(file && navigator.canShare && navigator.canShare({ files: [file] })){
+    navigator.share({ files: [file], text: message })
+        .catch(() => window.open(`https://wa.me/?text=${encodeURIComponent(message)}`));
     return;
 }
 
-const fileId = extractDriveFileId(invoiceUrl);
-const pdfDirectUrl = fileId ? `${API_URL}?action=invoice&fileId=${fileId}` : invoiceUrl;
-
-try{
-    const resp = await fetch(pdfDirectUrl);
-    if(!resp.ok) throw new Error("PDF fetch failed: " + resp.status);
-    const blob = await resp.blob();
-    const file = new File([blob], `Invoice - ${school}.pdf`, { type: "application/pdf" });
-
-    if(navigator.canShare && navigator.canShare({ files: [file] })){
-        await navigator.share({ files: [file], text: message });
-        return;
-    }
-}catch(err){
-    // fall through to the link-based fallback below
+if(!file){
+    showToast("Invoice is still being prepared — give it a few seconds and tap again.");
+} else {
+    showToast("This device can't attach files directly — opening the PDF so you can attach it.");
+    if(ds.invoiceUrl) window.open(ds.invoiceUrl, "_blank");
 }
 
-// Desktop browsers (and older mobile browsers) can't share a file this way.
-// Open the PDF so it can be saved, and open WhatsApp with the text message
-// so the file can be attached manually.
-window.open(pdfDirectUrl, "_blank");
 window.open(`https://wa.me/?text=${encodeURIComponent(message)}`);
-showToast("PDF opened in a new tab — attach it manually in WhatsApp.");
 }
-
 function shareSMS(){
 
 let school = document.getElementById("summaryText").dataset.school;
