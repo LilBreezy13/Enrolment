@@ -1369,8 +1369,17 @@ async function submitEnrollment() {
         summaryText.dataset.invoiceUrl = data.invoiceUrl || "";
         summaryText.dataset.submissionId = data.submissionId || "";
 
-        summarySection.style.display = "block";
+               summarySection.style.display = "block";
         summarySection.scrollIntoView({ behavior: "smooth" });
+
+        // Start preparing the invoice PDF in the background right away, so it's
+        // usually ready by the time the user taps "Send Bill via WhatsApp".
+        // Sharing the actual file requires calling navigator.share() almost
+        // immediately after the click, so we can't afford to wait for this
+        // poll inside the click handler itself (see shareWhatsApp() below).
+        if (!summaryText.dataset.invoiceUrl) {
+            getInvoicePdfUrl();
+        }
 
         // RESET FORM AFTER SUCCESS
         reloadForm(false);
@@ -1700,15 +1709,20 @@ async function getInvoicePdfUrl(maxWaitMs = 45000, intervalMs = 2500){
 
 async function shareWhatsApp(){
 
-let school = document.getElementById("summaryText").dataset.school;
+const ds = document.getElementById("summaryText").dataset;
+let school = ds.school;
 let message = buildMessage(school);
 
-showToast("Preparing invoice PDF...");
-
-const invoiceUrl = await getInvoicePdfUrl();
+// IMPORTANT: navigator.share() must fire almost immediately after the click,
+// or the browser treats it as no longer "user initiated" and silently fails,
+// which is why the app used to always fall back to a text-only link. So we
+// never poll/wait here — the PDF was already being prepared in the
+// background since the summary was shown (see the getInvoicePdfUrl() call
+// right after summarySection.scrollIntoView).
+const invoiceUrl = ds.invoiceUrl;
 
 if(!invoiceUrl){
-    showToast("Invoice isn't ready yet — sending message only. Try again in a moment to attach the PDF.");
+    showToast("Invoice is still being prepared — try again in a few seconds to attach the PDF.");
     window.open(`https://wa.me/?text=${encodeURIComponent(message)}`);
     return;
 }
