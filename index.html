@@ -1367,6 +1367,7 @@ async function submitEnrollment() {
         summaryText.dataset.total = bill.total;
      
         summaryText.dataset.invoiceUrl = data.invoiceUrl || "";
+        summaryText.dataset.submissionId = data.submissionId || "";
 
         summarySection.style.display = "block";
         summarySection.scrollIntoView({ behavior: "smooth" });
@@ -1657,12 +1658,84 @@ toggleClasses();
 document.getElementById("french").value = "Yes";
 }
 
-function shareWhatsApp(){
+// Pulls the Drive file ID out of a "https://drive.google.com/file/d/<ID>/view" URL
+function extractDriveFileId(driveUrl){
+    const match = String(driveUrl || "").match(/\/d\/([a-zA-Z0-9_-]+)/);
+    return match ? match[1] : "";
+}
+
+// The invoice PDF is generated asynchronously (queued right after submit),
+// so on a brand-new submission it may not exist yet. Poll the backend for
+// up to ~45s, checking every 2.5s, until the invoiceUrl shows up.
+async function getInvoicePdfUrl(maxWaitMs = 45000, intervalMs = 2500){
+    const ds = document.getElementById("summaryText").dataset;
+
+    if(ds.invoiceUrl) return ds.invoiceUrl;
+
+    const submissionId = ds.submissionId;
+    const token = localStorage.getItem("token");
+    if(!submissionId || !token) return "";
+
+    const started = Date.now();
+
+    while(Date.now() - started < maxWaitMs){
+        try{
+            const res = await fetch(API_URL, {
+                method: "POST",
+                headers: { "Content-Type": "text/plain;charset=utf-8" },
+                body: JSON.stringify({ action: "checkInvoice", token, submissionId })
+            });
+            const data = await res.json();
+            if(data.status === "ok" && data.ready && data.invoiceUrl){
+                ds.invoiceUrl = data.invoiceUrl;
+                return data.invoiceUrl;
+            }
+        }catch(err){
+            // transient network hiccup — just retry
+        }
+        await new Promise(r => setTimeout(r, intervalMs));
+    }
+    return "";
+}
+
+async function shareWhatsApp(){
 
 let school = document.getElementById("summaryText").dataset.school;
 let message = buildMessage(school);
 
+showToast("Preparing invoice PDF...");
+
+const invoiceUrl = await getInvoicePdfUrl();
+
+if(!invoiceUrl){
+    showToast("Invoice isn't ready yet — sending message only. Try again in a moment to attach the PDF.");
+    window.open(`https://wa.me/?text=${encodeURIComponent(message)}`);
+    return;
+}
+
+const fileId = extractDriveFileId(invoiceUrl);
+const pdfDirectUrl = fileId ? `${API_URL}?action=invoice&fileId=${fileId}` : invoiceUrl;
+
+try{
+    const resp = await fetch(pdfDirectUrl);
+    if(!resp.ok) throw new Error("PDF fetch failed: " + resp.status);
+    const blob = await resp.blob();
+    const file = new File([blob], `Invoice - ${school}.pdf`, { type: "application/pdf" });
+
+    if(navigator.canShare && navigator.canShare({ files: [file] })){
+        await navigator.share({ files: [file], text: message });
+        return;
+    }
+}catch(err){
+    // fall through to the link-based fallback below
+}
+
+// Desktop browsers (and older mobile browsers) can't share a file this way.
+// Open the PDF so it can be saved, and open WhatsApp with the text message
+// so the file can be attached manually.
+window.open(pdfDirectUrl, "_blank");
 window.open(`https://wa.me/?text=${encodeURIComponent(message)}`);
+showToast("PDF opened in a new tab — attach it manually in WhatsApp.");
 }
 
 function shareSMS(){
