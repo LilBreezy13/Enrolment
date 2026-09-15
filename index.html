@@ -693,7 +693,7 @@ function generateSubmissionId(){
 window.repSchoolHistory = null;      // cached list, once loaded
 window.repSchoolHistoryLoading = false;
 
-async function loadRepSchoolHistory(){
+async function loadRepSchoolHistory(attempt = 1){
 
   const token = localStorage.getItem("token");
   if(!token) return;
@@ -711,15 +711,24 @@ async function loadRepSchoolHistory(){
     });
 
     let data = await res.json();
+    if(data.status !== "ok") throw new Error(data.status || "failed");
+
     window.repSchoolHistory = data.suggestions || [];
+    window.repSchoolHistoryLoading = false;
 
   }catch(err){
-    window.repSchoolHistory = null; // will fall back to live query
-  }finally{
-    window.repSchoolHistoryLoading = false;
+    // A cold backend or a network blip used to leave autofill silently dead
+    // until the rep logged out and back in. Retry quietly in the background
+    // instead — repSchoolHistoryLoading stays true across the retries, so
+    // onSchoolNameInput's poll keeps waiting rather than giving up.
+    if(attempt < 3){
+      setTimeout(() => loadRepSchoolHistory(attempt + 1), attempt * 700);
+    } else {
+      window.repSchoolHistory = null; // out of retries — fall back to live queries
+      window.repSchoolHistoryLoading = false;
+    }
   }
 }
-
 let schoolSuggestTimer = null;
 let schoolSuggestAbortToken = 0;
 
@@ -798,6 +807,12 @@ function onSchoolNameInput(){
 
   // SLOW PATH FALLBACK: cache not ready — ask backend directly (debounced)
   if(!window.repSchoolHistoryLoading){
+    // Cache previously ran out of retries and gave up — kick it off again
+    // quietly so the NEXT keystroke can hit the fast path, without making
+    // the rep log out and back in just to get autofill working again.
+    if(window.repSchoolHistory === null){
+      loadRepSchoolHistory();
+    }
     schoolSuggestTimer = setTimeout(() => fetchSchoolSuggestions(query), 200);
   } else {
     // cache is on its way — try again shortly rather than hitting the backend
@@ -963,10 +978,14 @@ function applySchoolSuggestion(i){
   if(!s) return;
 
 // NEW
-  document.getElementById("schoolName").value = s.school || "";
+   document.getElementById("schoolName").value = s.school || "";
   document.getElementById("location").value = s.location || "";
   document.getElementById("phone").value = s.phone || "";
   window.currentSchoolId = s.schoolId || "";
+
+  
+  window.confirmedSchoolId = s.schoolId || "";
+  window.confirmedSchoolName = String(s.school || "").trim().toUpperCase();
 
   checkSchoolBalanceFlag(window.currentSchoolId);
 
@@ -1047,6 +1066,11 @@ localStorage.setItem("token", data.token);
 localStorage.setItem("repId", rep);
 localStorage.setItem("role", data.role); // 
 
+/* PRELOAD SCHOOL AUTOFILL CACHE FIRST — fire this off immediately so the
+   request is already in flight while the rest of the UI sets up, instead
+   of sitting behind reloadForm() and loadHistory(). */
+loadRepSchoolHistory();
+
 /* LOAD UI IMMEDIATELY */
 loginBox.style.display="none";
 appBox.style.display="block";
@@ -1056,9 +1080,6 @@ reloadForm(true);
 
 /* LOAD HISTORY PER REP */
 loadHistory();
-
-/* PRELOAD SCHOOL AUTOFILL CACHE (instant suggestions, no per-keystroke lag) */
-loadRepSchoolHistory();
 
 showToast("Login successful");
 
@@ -1260,6 +1281,12 @@ async function submitEnrollment() {
     }
     const submissionId = window.currentSubmissionId;
 
+    
+    const confirmedSchoolIdToSend =
+        (window.confirmedSchoolId && window.confirmedSchoolName === school.toUpperCase())
+            ? window.confirmedSchoolId
+            : "";
+
     try {
 
         // SEND FIRST
@@ -1272,7 +1299,7 @@ async function submitEnrollment() {
                 submissionId,
                 expectedVersion: window.currentSubmissionVersion || null,
                 school,
-                schoolId: window.currentSchoolId || "",
+                schoolId: confirmedSchoolIdToSend,
                 region: regionVal,
                 location: locationVal,
                 phone: phoneVal,
@@ -1582,15 +1609,18 @@ function setSelectValueCI(selectEl, value){
   }
   return false;
 }
+
+
 function editSchool(data){
 
 window.currentSubmissionId = String(data.submissionId || "").trim();
 window.currentSchoolId = data.schoolId || "";
 
-// Remember what this record's last-modified stamp looked like at the
-// moment we loaded it. If someone else edits it before we save, the
-// backend will see this doesn't match anymore and refuse to silently
-// overwrite their change.
+
+window.confirmedSchoolId = data.schoolId || "";
+window.confirmedSchoolName = String(data.school || "").trim().toUpperCase();
+
+
 window.currentSubmissionVersion = data.editedTime || data.createdTime || "";
 
   document.getElementById("historyBox").style.display="none";
@@ -1675,6 +1705,8 @@ window.currentSchoolHasBalance = false;
 window.currentSchoolBalanceAmount = 0;
 window.currentSchoolBalanceExamLabel = "";
 window.balanceOverrideAcknowledged = false;
+window.confirmedSchoolId = "";
+window.confirmedSchoolName = "";
 
 /* CLEAR FORM */
 document.querySelectorAll("#formArea input").forEach(i=>i.value="");
