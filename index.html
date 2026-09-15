@@ -311,12 +311,30 @@ padding:20px;
 font-size:13px;
 list-style:none;
 }
+
+
 .history-time{
 font-size:11px;
 color:#777;
 margin-top:3px;
 }
 
+.history-share-btn{
+margin-top:10px;
+width:100%;
+padding:9px;
+border:none;
+border-radius:8px;
+background:#25D366;
+color:white;
+font-size:13px;
+font-weight:bold;
+cursor:pointer;
+}
+
+.history-share-btn:active{
+opacity:.85;
+}
 #classArea{
 max-height:250px;
 overflow-y:auto;
@@ -1493,7 +1511,6 @@ if(!filtered.length){
 list.innerHTML = "<li class='history-empty'>No matching schools found</li>";
 return;
 }
-
 filtered.forEach(d=>{
 
 let li=document.createElement("li");
@@ -1516,6 +1533,20 @@ ${new Date(d.editedTime).toLocaleString()}
 ` : ""}
 </div>
 `;
+
+// Lets a rep reshare this school's invoice from history at any time.
+// Always fetches whatever PDF is currently on file for this submissionId,
+// so a reshare after an edit carries the updated invoice automatically —
+// no separate "refresh" step needed.
+let shareBtn = document.createElement("button");
+shareBtn.type = "button";
+shareBtn.className = "history-share-btn";
+shareBtn.textContent = "Share Invoice via WhatsApp";
+shareBtn.onclick = function(event){
+  event.stopPropagation(); // don't also trigger editSchool()
+  shareHistoryInvoice(d);
+};
+li.appendChild(shareBtn);
 
 list.appendChild(li);
 
@@ -1789,16 +1820,66 @@ window.open(`sms:?body=${encodeURIComponent(message)}`);
 }
 
 
+// Keep in sync with EXAM_NAME in the backend script.
 const EXAM_NAME_LABEL = "Beta Mock";
 
-function buildMessage(school){
+// total is optional — omit it to pull from the just-submitted summary
+// (used by shareWhatsApp/shareSMS); pass it explicitly for a history reshare.
+function buildMessage(school, total){
 
-let ds = document.getElementById("summaryText").dataset;
+if(total === undefined){
+  let ds = document.getElementById("summaryText").dataset;
+  total = ds.total;
+}
 
 return `Dear ${school}
 Your registration for ${EXAM_NAME_LABEL} is successful!
-Total Bill: GHS ${ds.total}
+Total Bill: GHS ${total}
 PAY VIA 0247448883 | 0248726958`;
+}
+
+// Reshares a school's invoice straight from History. Unlike the just-submitted
+// flow, the PDF isn't prefetched — it's fetched fresh on tap by submissionId,
+// which guarantees the latest invoice (post any edits) is what gets shared.
+async function shareHistoryInvoice(d){
+
+const message = buildMessage(d.school, d.totalBill);
+const token = localStorage.getItem("token");
+const submissionId = String(d.submissionId || "").trim();
+
+if(!token || !submissionId){
+  window.open(`https://wa.me/?text=${encodeURIComponent(message)}`);
+  return;
+}
+
+showToast("Preparing invoice...");
+
+try{
+  const res = await fetch(API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body: JSON.stringify({ action: "getInvoicePdf", token, submissionId })
+  });
+  const data = await res.json();
+
+  if(data.status === "ok" && data.ready && data.base64){
+    const chars = atob(data.base64);
+    const bytes = new Uint8Array(chars.length);
+    for(let i = 0; i < chars.length; i++) bytes[i] = chars.charCodeAt(i);
+
+    const file = new File([bytes], `Invoice - ${d.school}.pdf`, { type: "application/pdf" });
+
+    if(navigator.canShare && navigator.canShare({ files: [file] })){
+      await navigator.share({ files: [file], text: message });
+      return;
+    }
+  }
+}catch(err){
+  // fall through to the link-based fallback below
+}
+
+showToast("Couldn't attach the invoice directly on this device — opening WhatsApp with the bill details instead.");
+window.open(`https://wa.me/?text=${encodeURIComponent(message)}`);
 }
 
 document.addEventListener("focusin", function(e){
