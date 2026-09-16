@@ -325,11 +325,27 @@ width:100%;
 padding:9px;
 border:none;
 border-radius:8px;
-background:#25D366;
+background:#1c7ed6;
 color:white;
 font-size:13px;
 font-weight:bold;
 cursor:pointer;
+transition:background .2s ease;
+}
+
+/* Blue = invoice not saved on this device yet. Green = saved and ready to
+   share instantly. The button never sits on "preparing" again. */
+.history-share-btn.pending{
+background:#1c7ed6;
+}
+
+.history-share-btn.ready{
+background:#25D366;
+}
+
+.history-share-btn:disabled{
+opacity:.6;
+cursor:default;
 }
 
 .history-share-btn:active{
@@ -1474,15 +1490,11 @@ async function submitEnrollment() {
                summarySection.style.display = "block";
         summarySection.scrollIntoView({ behavior: "smooth" });
 
-               // Start preparing the invoice PDF in the background right away, so it's
-        // usually ready by the time the user taps "Send Bill via WhatsApp".
-        // Sharing the actual file requires calling navigator.share() almost
-        // immediately after the click, so we can't afford to wait for this
-        // poll inside the click handler itself (see shareWhatsApp() below).
-        if (!summaryText.dataset.invoiceUrl) {
-            getInvoicePdfUrl();
-        }
-        prepareInvoiceFile();
+        // Fire-and-forget. The invoice is built by the server queue; nothing
+        // here waits for it. The rep gets the summary and a cleared form
+        // immediately, and the PDF quietly lands in this device's cache,
+        // turning that school's History button green when it's ready.
+        warmInvoiceCache(data.submissionId, school);
 
         // RESET FORM AFTER SUCCESS
         reloadForm(false);
@@ -1515,6 +1527,35 @@ let historyData = [];          // cached full history from the server
 let historyFilterMode = 'all'; // 'all' | 'edited'
 let historyLoadRetries = 0;
 const HISTORY_MAX_RETRIES = 5;
+const HISTORY_CACHE_PREFIX = "history_cache_";
+
+function historyCacheKey(){
+  return HISTORY_CACHE_PREFIX + (localStorage.getItem("repId") || "");
+}
+
+// Paints the last known list straight from device storage so History is never
+// blank or stuck on "Loading..." while the network round-trip is in flight.
+function primeHistoryFromCache(){
+  try{
+    const raw = localStorage.getItem(historyCacheKey());
+    if(!raw) return false;
+    const cached = JSON.parse(raw);
+    if(!Array.isArray(cached) || !cached.length) return false;
+    historyData = cached;
+    renderHistoryList();
+    return true;
+  }catch(err){
+    return false;
+  }
+}
+
+function saveHistoryToCache(){
+  try{
+    localStorage.setItem(historyCacheKey(), JSON.stringify(historyData.slice(0, 300)));
+  }catch(err){
+    // storage full — the list still works, it just won't be instant next time
+  }
+}
 
 async function loadHistory(){
 
@@ -1522,7 +1563,19 @@ let token = localStorage.getItem("token");
 if(!token) return;
 
 let list=document.getElementById("historyList");
-list.innerHTML="Loading...";
+
+// Show something immediately: whatever is already in memory, else the cached
+// copy from the last session. "Loading..." only appears on a true cold start.
+let hadSomething = false;
+if(historyData.length){
+  renderHistoryList();
+  hadSomething = true;
+} else {
+  hadSomething = primeHistoryFromCache();
+}
+if(!hadSomething){
+  list.innerHTML="<li class='history-empty'>Loading...</li>";
+}
 
 try{
 
@@ -1549,15 +1602,18 @@ if(data.status === "deactivated"){
 
 historyLoadRetries = 0;
 historyData = data.history || [];
+saveHistoryToCache();
 
 renderHistoryList();
 
 }catch(e){
   historyLoadRetries++;
   if(historyLoadRetries <= HISTORY_MAX_RETRIES){
-    list.innerHTML="<li class='history-empty'>Reconnecting...</li>";
+    if(!hadSomething){
+      list.innerHTML="<li class='history-empty'>Reconnecting...</li>";
+    }
     setTimeout(loadHistory, 2000);
-  } else {
+  } else if(!hadSomething){
     list.innerHTML="<li class='history-empty'>Couldn't load history. Check your connection and <a href='#' onclick='historyLoadRetries=0;loadHistory();return false;'>tap to retry</a>.</li>";
   }
 }
@@ -1596,7 +1652,7 @@ if(!filtered.length){
 list.innerHTML = "<li class='history-empty'>No matching schools found</li>";
 return;
 }
-filtered.forEach(d=>{
+filtered.forEach((d, idx)=>{
 
 let li=document.createElement("li");
 li.className="history-item";
@@ -1619,19 +1675,33 @@ ${new Date(d.editedTime).toLocaleString()}
 </div>
 `;
 
-// Lets a rep reshare this school's invoice from history at any time.
-// Always fetches whatever PDF is currently on file for this submissionId,
-// so a reshare after an edit carries the updated invoice automatically —
-// no separate "refresh" step needed.
+// The invoice is saved to this device once and then reused forever. The
+// button starts blue ("save"), and flips to green ("share") the moment the
+// PDF is on the device. It only ever goes back to blue when the record is
+// edited, because the version stamp below changes and invalidates the copy.
 let shareBtn = document.createElement("button");
 shareBtn.type = "button";
-shareBtn.className = "history-share-btn";
-shareBtn.textContent = "Share Invoice via WhatsApp";
+shareBtn.className = "history-share-btn pending";
+shareBtn.textContent = "Save Invoice for Sharing";
+shareBtn.dataset.submissionId = String(d.submissionId || "");
+shareBtn.dataset.version = invoiceVersionOf(d);
 shareBtn.onclick = function(event){
   event.stopPropagation(); // don't also trigger editSchool()
-  shareHistoryInvoice(d);
+  shareHistoryInvoice(d, shareBtn);
 };
 li.appendChild(shareBtn);
+
+// Already on the device? Go green straight away — no network call, no
+// regeneration, and it survives closing the app.
+loadCachedInvoice(shareBtn.dataset.submissionId, shareBtn.dataset.version)
+  .then(function(file){
+    if(file){
+      setShareBtnReady(shareBtn);
+    } else if(idx < 6){
+      // Quietly fetch the newest few so they're green before the rep asks.
+      warmInvoiceCache(d.submissionId, d.school, shareBtn.dataset.version);
+    }
+  });
 
 list.appendChild(li);
 
@@ -1789,88 +1859,179 @@ toggleClasses();
 document.getElementById("french").value = "Yes";
 }
 
-// Pulls the Drive file ID out of a "https://drive.google.com/file/d/<ID>/view" URL
-function extractDriveFileId(driveUrl){
-    const match = String(driveUrl || "").match(/\/d\/([a-zA-Z0-9_-]+)/);
-    return match ? match[1] : "";
+/* ================= INVOICE CACHE (saved on device) =================
+   An invoice is downloaded ONCE and then kept in IndexedDB, keyed by
+   submissionId along with a version stamp (editedTime || createdTime).
+   It is reused forever from that point on — across reloads and app
+   restarts — and is only ever refetched when the stamp changes, which
+   happens only when the registration is edited. Nothing in the submit
+   path waits on any of this.
+=================================================================== */
+const INVOICE_DB_NAME = "bbek_invoices";
+const INVOICE_STORE   = "pdfs";
+
+let _invoiceDbPromise = null;
+const _invoiceMemCache = new Map();   // submissionId -> {submissionId, version, name, bytes}
+
+function openInvoiceDb(){
+    if(_invoiceDbPromise) return _invoiceDbPromise;
+    _invoiceDbPromise = new Promise(function(resolve){
+        try{
+            const req = indexedDB.open(INVOICE_DB_NAME, 1);
+            req.onupgradeneeded = function(){
+                const db = req.result;
+                if(!db.objectStoreNames.contains(INVOICE_STORE)){
+                    db.createObjectStore(INVOICE_STORE, { keyPath: "submissionId" });
+                }
+            };
+            req.onsuccess = function(){ resolve(req.result); };
+            req.onerror   = function(){ resolve(null); };
+        }catch(err){
+            resolve(null); // private mode / storage blocked — memory cache still works
+        }
+    });
+    return _invoiceDbPromise;
 }
 
-// The invoice PDF is generated asynchronously (queued right after submit),
-// so on a brand-new submission it may not exist yet. Poll the backend for
-// up to ~45s, checking every 2.5s, until the invoiceUrl shows up.
-async function getInvoicePdfUrl(maxWaitMs = 45000, intervalMs = 2500){
-    const ds = document.getElementById("summaryText").dataset;
-
-    if(ds.invoiceUrl) return ds.invoiceUrl;
-
-    const submissionId = ds.submissionId;
-    const token = localStorage.getItem("token");
-    if(!submissionId || !token) return "";
-
-    const started = Date.now();
-
-    while(Date.now() - started < maxWaitMs){
+async function idbGetInvoice(submissionId){
+    const db = await openInvoiceDb();
+    if(!db) return null;
+    return new Promise(function(resolve){
         try{
-            const res = await fetch(API_URL, {
-                method: "POST",
-                headers: { "Content-Type": "text/plain;charset=utf-8" },
-                body: JSON.stringify({ action: "checkInvoice", token, submissionId })
-            });
-            const data = await res.json();
-            if(data.status === "ok" && data.ready && data.invoiceUrl){
-                ds.invoiceUrl = data.invoiceUrl;
-                return data.invoiceUrl;
-            }
-        }catch(err){
-            // transient network hiccup — just retry
-        }
-        await new Promise(r => setTimeout(r, intervalMs));
-    }
-    return "";
+            const req = db.transaction(INVOICE_STORE, "readonly")
+                          .objectStore(INVOICE_STORE).get(String(submissionId));
+            req.onsuccess = function(){ resolve(req.result || null); };
+            req.onerror   = function(){ resolve(null); };
+        }catch(err){ resolve(null); }
+    });
 }
 
-// Pulls the invoice PDF down as base64 over the POST channel and turns it into
-// a File held in memory, ready to hand straight to navigator.share(). This runs
-// in the background from the moment the summary appears, because the share call
-// itself can't afford to await anything (see shareWhatsApp below).
-window.pendingInvoiceFile = null;
+async function idbPutInvoice(rec){
+    const db = await openInvoiceDb();
+    if(!db) return;
+    try{
+        db.transaction(INVOICE_STORE, "readwrite").objectStore(INVOICE_STORE).put(rec);
+    }catch(err){}
+}
 
-async function prepareInvoiceFile(maxWaitMs = 60000, intervalMs = 3000){
-    window.pendingInvoiceFile = null;
+// An edit moves editedTime, which is exactly when a fresh invoice is issued.
+function invoiceVersionOf(d){
+    if(!d) return "";
+    return String(d.editedTime || d.createdTime || "");
+}
 
-    const ds = document.getElementById("summaryText").dataset;
-    const submissionId = ds.submissionId;
+function invoiceVersionFor(submissionId){
+    const row = (historyData || []).find(function(h){
+        return String(h.submissionId) === String(submissionId);
+    });
+    return invoiceVersionOf(row);
+}
+
+function invoiceFileFromRecord(rec){
+    return new File([rec.bytes], rec.name, { type: "application/pdf" });
+}
+
+// SYNCHRONOUS on purpose. navigator.share() must be called while the click's
+// transient activation is still alive, and any await burns it — that was the
+// old "stuck on preparing" behaviour. Returns null if not already in memory.
+function getCachedInvoiceFile(submissionId, version){
+    const rec = _invoiceMemCache.get(String(submissionId));
+    if(!rec) return null;
+    if(version && rec.version && rec.version !== version) return null; // edited since
+    return invoiceFileFromRecord(rec);
+}
+
+// Pulls a saved invoice up from IndexedDB into memory (once per session).
+async function loadCachedInvoice(submissionId, version){
+    const key = String(submissionId || "");
+    if(!key) return null;
+
+    const hit = getCachedInvoiceFile(key, version);
+    if(hit) return hit;
+
+    const rec = await idbGetInvoice(key);
+    if(!rec) return null;
+    if(version && rec.version && rec.version !== version) return null;
+
+    _invoiceMemCache.set(key, rec);
+    return invoiceFileFromRecord(rec);
+}
+
+// Downloads the PDF and saves it. Returns null when the server hasn't
+// finished generating it yet — that's expected right after a submit.
+async function fetchAndCacheInvoice(submissionId, schoolName, version){
     const token = localStorage.getItem("token");
-    if(!submissionId || !token) return;
+    const key = String(submissionId || "");
+    if(!token || !key) return null;
 
-    const started = Date.now();
+    try{
+        const res = await fetch(API_URL, {
+            method: "POST",
+            headers: { "Content-Type": "text/plain;charset=utf-8" },
+            body: JSON.stringify({ action: "getInvoicePdf", token, submissionId: key })
+        });
+        const data = await res.json();
+        if(!(data.status === "ok" && data.ready && data.base64)) return null;
 
-    while(Date.now() - started < maxWaitMs){
-        try{
-            const res = await fetch(API_URL, {
-                method: "POST",
-                headers: { "Content-Type": "text/plain;charset=utf-8" },
-                body: JSON.stringify({ action: "getInvoicePdf", token, submissionId })
-            });
-            const data = await res.json();
+        const chars = atob(data.base64);
+        const bytes = new Uint8Array(chars.length);
+        for(let i = 0; i < chars.length; i++) bytes[i] = chars.charCodeAt(i);
 
-            if(data.status === "ok" && data.ready && data.base64){
-                const chars = atob(data.base64);
-                const bytes = new Uint8Array(chars.length);
-                for(let i = 0; i < chars.length; i++) bytes[i] = chars.charCodeAt(i);
+        const rec = {
+            submissionId: key,
+            version: version || invoiceVersionFor(key),
+            name: `Invoice - ${schoolName || "School"}.pdf`,
+            bytes: bytes
+        };
 
-                window.pendingInvoiceFile = new File(
-                    [bytes],
-                    `Invoice - ${ds.school || "School"}.pdf`,
-                    { type: "application/pdf" }
-                );
-                return;
-            }
-        }catch(err){
-            // transient network hiccup — just retry
-        }
-        await new Promise(r => setTimeout(r, intervalMs));
+        _invoiceMemCache.set(key, rec);
+        idbPutInvoice(rec);
+
+        return invoiceFileFromRecord(rec);
+    }catch(err){
+        return null;
     }
+}
+
+function setShareBtnReady(btn){
+    if(!btn) return;
+    btn.classList.remove("pending");
+    btn.classList.add("ready");
+    btn.dataset.ready = "1";
+    btn.textContent = "Share Invoice via WhatsApp";
+}
+
+function markInvoiceReadyInHistory(submissionId){
+    document.querySelectorAll(".history-share-btn").forEach(function(btn){
+        if(btn.dataset.submissionId === String(submissionId)) setShareBtnReady(btn);
+    });
+}
+
+// Background warm-up. Never awaited by anything the rep is waiting on.
+// Polls until the queued invoice exists, saves it, then flips the button green.
+function warmInvoiceCache(submissionId, schoolName, version, maxWaitMs = 180000, intervalMs = 5000){
+    const key = String(submissionId || "");
+    if(!key) return;
+
+    window._invoiceWarming = window._invoiceWarming || {};
+    if(window._invoiceWarming[key]) return;   // already polling for this one
+    window._invoiceWarming[key] = true;
+
+    (async function(){
+        const started = Date.now();
+        try{
+            while(Date.now() - started < maxWaitMs){
+                const file = await fetchAndCacheInvoice(key, schoolName, version);
+                if(file){
+                    markInvoiceReadyInHistory(key);
+                    return;
+                }
+                await new Promise(function(r){ setTimeout(r, intervalMs); });
+            }
+        } finally {
+            delete window._invoiceWarming[key];
+        }
+    })();
 }
 
 function shareWhatsApp(){
@@ -1879,12 +2040,8 @@ const ds = document.getElementById("summaryText").dataset;
 const school = ds.school;
 const message = buildMessage(school);
 
-// No awaits before navigator.share(). The browser only allows a share while
-// the click's transient activation is alive, and awaiting a fetch here burns
-// it — that's why this used to silently fall back to a text-only link even
-// when the PDF fetch succeeded. The File was built ahead of time by
-// prepareInvoiceFile(), which started as soon as the summary was shown.
-const file = window.pendingInvoiceFile;
+// No awaits before navigator.share() — see getCachedInvoiceFile above.
+const file = getCachedInvoiceFile(ds.submissionId, "");
 
 if(file && navigator.canShare && navigator.canShare({ files: [file] })){
     navigator.share({ files: [file], text: message })
@@ -1892,15 +2049,10 @@ if(file && navigator.canShare && navigator.canShare({ files: [file] })){
     return;
 }
 
-if(!file){
-    showToast("Invoice is still being prepared — give it a few seconds and tap again.");
-} else {
-    showToast("This device can't attach files directly opening the PDF so you can attach it.");
-    if(ds.invoiceUrl) window.open(ds.invoiceUrl, "_blank");
-}
-
+showToast("Bill sent by SMS. The invoice is still being built — share it from History once its button turns green.");
 window.open(`https://wa.me/?text=${encodeURIComponent(message)}`);
 }
+
 function shareSMS(){
 
 let school = document.getElementById("summaryText").dataset.school;
@@ -1928,47 +2080,58 @@ Total Bill: GHS ${total}
 PAY VIA 0247448883 | 0248726958`;
 }
 
-// Reshares a school's invoice straight from History. Unlike the just-submitted
-// flow, the PDF isn't prefetched — it's fetched fresh on tap by submissionId,
-// which guarantees the latest invoice (post any edits) is what gets shared.
-async function shareHistoryInvoice(d){
+// Shares a school's invoice from History.
+//
+// Green button: the PDF is already on this device, so the File is built
+// synchronously and handed straight to navigator.share() — instant, and never
+// "preparing" again. Blue button: saves it once (server round-trip), goes
+// green, and every tap after that takes the fast path.
+async function shareHistoryInvoice(d, btn){
 
 const message = buildMessage(d.school, d.totalBill);
-const token = localStorage.getItem("token");
 const submissionId = String(d.submissionId || "").trim();
+const version = invoiceVersionOf(d);
 
-if(!token || !submissionId){
+if(!submissionId){
   window.open(`https://wa.me/?text=${encodeURIComponent(message)}`);
   return;
 }
 
-showToast("Preparing invoice...");
-
-try{
-  const res = await fetch(API_URL, {
-    method: "POST",
-    headers: { "Content-Type": "text/plain;charset=utf-8" },
-    body: JSON.stringify({ action: "getInvoicePdf", token, submissionId })
-  });
-  const data = await res.json();
-
-  if(data.status === "ok" && data.ready && data.base64){
-    const chars = atob(data.base64);
-    const bytes = new Uint8Array(chars.length);
-    for(let i = 0; i < chars.length; i++) bytes[i] = chars.charCodeAt(i);
-
-    const file = new File([bytes], `Invoice - ${d.school}.pdf`, { type: "application/pdf" });
-
-    if(navigator.canShare && navigator.canShare({ files: [file] })){
-      await navigator.share({ files: [file], text: message });
-      return;
-    }
-  }
-}catch(err){
-  // fall through to the link-based fallback below
+// FAST PATH — nothing awaited, so the share sheet opens with the PDF attached.
+const cached = getCachedInvoiceFile(submissionId, version);
+if(cached && navigator.canShare && navigator.canShare({ files: [cached] })){
+  navigator.share({ files: [cached], text: message })
+    .catch(() => window.open(`https://wa.me/?text=${encodeURIComponent(message)}`));
+  return;
 }
 
-showToast("Couldn't attach the invoice directly on this device opening WhatsApp with the bill details instead.");
+// SLOW PATH — runs at most once per invoice (or once more after an edit).
+if(btn){ btn.disabled = true; btn.textContent = "Saving invoice..."; }
+
+let file = await loadCachedInvoice(submissionId, version);
+if(!file) file = await fetchAndCacheInvoice(submissionId, d.school, version);
+
+if(btn) btn.disabled = false;
+
+if(!file){
+  if(btn) btn.textContent = "Save Invoice for Sharing";
+  showToast("Invoice isn't ready yet — it's still being generated. Try again in a moment.");
+  warmInvoiceCache(submissionId, d.school, version);
+  return;
+}
+
+if(btn) setShareBtnReady(btn);
+
+if(navigator.canShare && navigator.canShare({ files: [file] })){
+  try{
+    await navigator.share({ files: [file], text: message });
+  }catch(err){
+    showToast("Invoice saved to this device — tap the green button to share it.");
+  }
+  return;
+}
+
+showToast("This device can't attach files directly — opening WhatsApp with the bill details instead.");
 window.open(`https://wa.me/?text=${encodeURIComponent(message)}`);
 }
 
