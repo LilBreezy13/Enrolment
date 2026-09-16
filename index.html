@@ -1550,7 +1550,7 @@ async function submitEnrollment() {
         // silently overwrite their change. Send the rep back to history
         // to pull the latest version before retrying.
         if (data.status === "conflict") {
-            showToast("This record was updated by someone else — reload history and try again");
+            showToast("This record was updated by someone else reload history and try again");
             btn.disabled = false;
             btn.innerText = "Submit Enrollment";
             loadHistory();
@@ -1558,7 +1558,7 @@ async function submitEnrollment() {
         }
 
         if (data.status === "busy") {
-            showToast("Server is busy — please try again in a few seconds");
+            showToast("Server is busy please try again in a few seconds");
             btn.disabled = false;
             btn.innerText = "Submit Enrollment";
             return;

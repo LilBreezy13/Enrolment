@@ -182,10 +182,7 @@
     <div id="toast"></div>
 
     <script>
-      // Same two-backend config as index.html. This page can't offer an
-      // exam SWITCHER (the token in localStorage only works against
-      // whichever backend the rep is currently logged into) — it just
-      // reads and displays whichever exam is active.
+     
       const EXAMS = {
         OCT: {
           label: "October Mock (Beta)",
@@ -193,8 +190,7 @@
         },
         SEPT: {
           label: "September Mock (Alpha)",
-    apiUrl: "https://script.google.com/macros/s/AKfycbyPRyb0tKH18K5CsPDlpYl1reuEGsEYTHcyeAebugtjTquvCDuKMAjbdRFkBxKtut5Y1g/exec",
-          
+          apiUrl: "https://script.google.com/macros/s/AKfycbyPRyb0tKH18K5CsPDlpYl1reuEGsEYTHcyeAebugtjTquvCDuKMAjbdRFkBxKtut5Y1g/exec"
         }
       };
 
@@ -222,7 +218,7 @@
         setTimeout(() => t.classList.remove("show"), 2000);
       }
 
-      // DOWNLOAD REPORRT SCRIPT
+      // DOWNLOAD REPORT SCRIPT
 
       function downloadReport(type) {
         let from = null;
@@ -243,9 +239,6 @@
           showToast("Session expired");
           return;
         }
-
-        // OPEN TAB IMMEDIATELY (Safari fix)
-        const newTab = window.open("", "_blank");
 
         // Loader
         const loader = document.getElementById("loader");
@@ -281,16 +274,12 @@
 
             if (res.status === "success") {
               bar.style.width = "100%";
-              text.innerText = "Opening PDF...";
+              text.innerText = "Downloading...";
 
               setTimeout(() => {
                 loader.classList.remove("show");
 
-                // The backend sends the actual PDF as base64 (pdfBase64),
-                // not a URL — build a real Blob from it and open THAT in
-                // the already-open tab, instead of redirecting to a
-                // "res.url" that was never returned (this was causing the
-                // 404: NOT_FOUND on /undefined).
+                
                 const byteCharacters = atob(res.pdfBase64);
                 const byteNumbers = new Array(byteCharacters.length);
                 for (let i = 0; i < byteCharacters.length; i++) {
@@ -300,14 +289,23 @@
                 const blob = new Blob([byteArray], { type: "application/pdf" });
                 const blobUrl = URL.createObjectURL(blob);
 
-                // Not strictly needed for a new-tab open (no filename shows),
-                // but keeps things consistent if this is ever changed to a
-                // direct download — tags which exam the PDF came from.
-                newTab.location.href = blobUrl;
-              }, 600);
+                const examTag = currentExam(); // "OCT" or "SEPT"
+                const filename = res.filename
+                  ? res.filename.replace(/\.pdf$/i, "") + "_" + examTag + ".pdf"
+                  : "Report_" + examTag + ".pdf";
+
+                const a = document.createElement("a");
+                a.href = blobUrl;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+
+                showToast("Report downloaded");
+              }, 400);
             } else {
               loader.classList.remove("show");
-              newTab.close(); // close blank tab if failed
 
               if (res.status === "no_data") {
                 showToast("No data found");
@@ -319,7 +317,6 @@
           .catch(() => {
             clearInterval(interval);
             loader.classList.remove("show");
-            newTab.close();
             showToast("Network error");
           });
       }
