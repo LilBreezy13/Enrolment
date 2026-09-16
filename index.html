@@ -520,7 +520,7 @@ background:#b45f06;
 <option value="SEPT">September Mock (Alpha)</option>
 </select>
 <small style="display:block;margin:2px 0 10px;color:#888;font-size:10px;text-align:center;">
-Use the Rep ID assigned to you for THIS exam — Sept and Oct IDs are different.
+Use the Rep ID assigned to you and select the exam you are registering for. Sept and Oct .
 </small>
 
 <input id="repId" placeholder="Rep ID">
@@ -695,30 +695,23 @@ Registration Portal • Designed by Nick
 
 <script>
 
-// TWO separate backends — one per exam. Each is its own Apps Script
-// project with its own spreadsheet, its own REPS list, its own invoice
-// numbering, and its own SMS wording. A rep logs into ONE of them per
-// session, using the Rep ID assigned to them in THAT exam's roster.
+
 const EXAMS = {
   OCT: {
     label: "October Mock (Beta)",
     apiUrl: "https://script.google.com/macros/s/AKfycbyl1OJhZSEfk96nsFrqZ-WjGVhb8ZIWjVggr-wiIamoQ_Bt8WQUSF12zw9NxNL6uJPFmw/exec",
     examName: "Beta Mock",
     momoText: "0247448883 | 0248726958 | 0207732900 (Telecel)",
-    // October's backend has the newer endpoints (getInvoicePdf,
-    // checkSubmission, checkBalance) that let the app cache the invoice
-    // PDF on-device and share it as a real attached file.
+  
     supportsFileShare: true
   },
   SEPT: {
     label: "September Mock (Alpha)",
-    // PASTE the September project's own Web App /exec URL here before
-    // testing September logins — this is a placeholder on purpose.
+   
     apiUrl: "https://script.google.com/macros/s/AKfycbyPRyb0tKH18K5CsPDlpYl1reuEGsEYTHcyeAebugtjTquvCDuKMAjbdRFkBxKtut5Y1g/exec",
     examName: "Alpha Mock",
     momoText: "0247448883 | 0248726958",
-    // September's backend doesn't have getInvoicePdf/checkSubmission —
-    // invoice sharing there falls back to opening the Drive link directly.
+   
     supportsFileShare: false
   }
 };
@@ -732,10 +725,7 @@ function examSupportsFileShare(){
   return !!EXAMS[currentExam()].supportsFileShare;
 }
 
-// Prefixes a cache key with the active exam so the on-device invoice
-// cache (memory + IndexedDB) can never mix up a September PDF with an
-// October one, even in the astronomically unlikely case two submission
-// IDs collided across the two backends.
+
 function cacheKey(id){
   return currentExam() + "::" + String(id || "");
 }
@@ -746,9 +736,7 @@ function setActiveExam(exam){
   API_URL = EXAMS[exam].apiUrl;
 }
 
-// Mutable on purpose — every fetch()/postJSON() call in this file reads
-// this shared variable at call time, so switching exams just means
-// reassigning it once at login.
+
 let API_URL = EXAMS[currentExam()].apiUrl;
 
 function applyExamBanner(){
@@ -760,10 +748,7 @@ function applyExamBanner(){
   if(banner) banner.className = "exam-banner exam-" + exam;
 }
 
-// A rep switches exams by logging out and logging back in with the Rep
-// ID assigned to them in that other exam's roster — there is no
-// dual-session, because a token from one backend means nothing to the
-// other backend's PropertiesService store.
+
 function logoutAndSwitchExam(){
   localStorage.removeItem("token");
   localStorage.removeItem("repId");
@@ -775,10 +760,7 @@ function logoutAndSwitchExam(){
   if(sel) sel.value = currentExam();
 }
 
-// NEW — replaces the raw fetch() calls used everywhere. Adds a client-side
-// timeout so a dropped/slow connection fails fast (instead of leaving a
-// button stuck on "Submitting..." forever), and gives ONE consistent
-// error instead of a different message from every call site.
+
 async function postJSON(payload, timeoutMs = 20000){
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -829,10 +811,7 @@ function forceRelogin(message){
   showToast(message || "Session expired — please log in again");
 }
 
-// Escapes user-supplied text (school/location/phone come straight from the
-// sheet, which anyone with a rep login can write to) before it's inserted
-// via innerHTML. Without this a school name like <img src=x onerror=...>
-// would execute as stored XSS the next time any rep's history list renders it.
+
 function escapeHtml(str){
   return String(str == null ? "" : str)
     .replace(/&/g, "&amp;")
@@ -842,10 +821,7 @@ function escapeHtml(str){
     .replace(/'/g, "&#39;");
 }
 
-// One unique ID per NEW enrollment attempt, generated once and reused
-// across retries so a dropped connection can never create a duplicate
-// row — the backend will treat a repeated ID as an edit of the same
-// row (a no-op if nothing changed) rather than a fresh submission.
+
 function generateSubmissionId(){
   return Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 10);
 }
@@ -1210,15 +1186,13 @@ async function login(){
   const examCfg = EXAMS[examChoice];
 
   if(!examCfg || examCfg.apiUrl.indexOf("PASTE_") === 0){
-    showToast("That exam's backend isn't configured yet — contact admin");
+    showToast("That exam's backend isn't configured yet  contact admin");
     btn.disabled=false;
     btn.innerText="Login";
     return;
   }
 
-  // Set BEFORE the request — this call itself must go to the exam's
-  // own project, since the Rep ID/PIN the person is about to type only
-  // exists in that one project's REPS list.
+  
   setActiveExam(examChoice);
 
   const rep=document.getElementById("repId").value;
@@ -1237,7 +1211,7 @@ async function login(){
   }
 
   if(!data){
-    showToast("Connection error — please try again");
+    showToast("Connection error please try again");
     btn.disabled=false;
     btn.innerText="Login";
     return;
@@ -1258,7 +1232,7 @@ async function login(){
     reloadForm(true);
     loadHistory();
 
-    showToast("Login successful — " + examCfg.label);
+    showToast("Login successful  " + examCfg.label);
 
   }else if(data.status === "locked"){
     showToast("Too many failed attempts. Try again in 15 minutes.");
