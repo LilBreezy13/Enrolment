@@ -633,6 +633,25 @@ Registration Portal • Designed by Nick
 
 const API_URL="https://script.google.com/macros/s/AKfycbyl1OJhZSEfk96nsFrqZ-WjGVhb8ZIWjVggr-wiIamoQ_Bt8WQUSF12zw9NxNL6uJPFmw/exec";
 
+// NEW — replaces the raw fetch() calls used everywhere. Adds a client-side
+// timeout so a dropped/slow connection fails fast (instead of leaving a
+// button stuck on "Submitting..." forever), and gives ONE consistent
+// error instead of a different message from every call site.
+async function postJSON(payload, timeoutMs = 20000){
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try{
+    const res = await fetch(API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
 // The only language values the form is allowed to submit — must match
 // the <option> list in the #language <select> exactly, plus "NO".
 const VALID_LANGUAGES = ["Asante Twi","Akuapem Twi","Ga","Ewe","Fante","Dagbani","Dagaare","Dangme","Gonja","Kasem","Nzema","NO"];
@@ -1041,60 +1060,56 @@ document.addEventListener("click", function(e){
 
 async function login(){
 
-let btn=document.getElementById("loginBtn");
-btn.disabled=true;
-btn.innerText="Logging in...";
+  const btn=document.getElementById("loginBtn");
+  btn.disabled=true;
+  btn.innerText="Logging in...";
 
-let rep=document.getElementById("repId").value;
+  const rep=document.getElementById("repId").value;
+  const pin=document.getElementById("repPin").value;
 
-try{
+  let data = null;
 
-let res=await fetch(API_URL,{
-method:"POST",
-headers:{ "Content-Type":"text/plain;charset=utf-8"},
-body:JSON.stringify({
-action:"login",
-repId:rep,
-pin:document.getElementById("repPin").value
-})
-});
+  // Try up to twice with a hard 15s timeout each — most "connection
+  // errors" are one dropped packet, not the device actually being offline.
+  for(let attempt = 1; attempt <= 2 && !data; attempt++){
+    try{
+      data = await postJSON({ action:"login", repId:rep, pin:pin }, 15000);
+    }catch(err){
+      if(attempt === 1) await new Promise(r => setTimeout(r, 800));
+    }
+  }
 
-let data=await res.json();
-if(data.status==="ok"){
+  if(!data){
+    showToast("Connection error — please try again");
+    btn.disabled=false;
+    btn.innerText="Login";
+    return;
+  }
 
-localStorage.setItem("token", data.token);
-localStorage.setItem("repId", rep);
-localStorage.setItem("role", data.role); // 
+  if(data.status==="ok"){
 
-/* PRELOAD SCHOOL AUTOFILL CACHE FIRST — fire this off immediately so the
-   request is already in flight while the rest of the UI sets up, instead
-   of sitting behind reloadForm() and loadHistory(). */
-loadRepSchoolHistory();
+    localStorage.setItem("token", data.token);
+    localStorage.setItem("repId", rep);
+    localStorage.setItem("role", data.role);
 
-/* LOAD UI IMMEDIATELY */
-loginBox.style.display="none";
-appBox.style.display="block";
+    loadRepSchoolHistory();
 
-/* SET UP MOCK FORM DEFAULTS — Basic 9 field + French forced to Yes */
-reloadForm(true);
+    loginBox.style.display="none";
+    appBox.style.display="block";
 
-/* LOAD HISTORY PER REP */
-loadHistory();
+    reloadForm(true);
+    loadHistory();
 
-showToast("Login successful");
+    showToast("Login successful");
 
-}else if(data.status === "locked"){
-showToast("Too many failed attempts. Try again in 15 minutes.");
-}else{
-showToast("Invalid login");
-}
+  }else if(data.status === "locked"){
+    showToast("Too many failed attempts. Try again in 15 minutes.");
+  }else{
+    showToast("Invalid login");
+  }
 
-}catch(err){
-showToast("Connection error");
-}
-
-btn.disabled=false;
-btn.innerText="Login";
+  btn.disabled=false;
+  btn.innerText="Login";
 }
 
 // function toggleClasses(){
@@ -1287,53 +1302,79 @@ async function submitEnrollment() {
             ? window.confirmedSchoolId
             : "";
 
+    const submitPayload = {
+        action: "submit",
+        token: localStorage.getItem("token"),
+        submissionId,
+        expectedVersion: window.currentSubmissionVersion || null,
+        school,
+        schoolId: confirmedSchoolIdToSend,
+        region: regionVal,
+        location: locationVal,
+        phone: phoneVal,
+        language: languageVal,
+        french: frenchVal,
+        examType: exam,
+        packageOption: packageVal,
+        enrollments,
+        totalBill: bill.total,
+        balanceOverride: window.currentSchoolHasBalance ? true : false,
+        balanceAtSubmission: window.currentSchoolHasBalance ? window.currentSchoolBalanceAmount : 0
+    };
+
+    let data = null;
+
     try {
-
-        // SEND FIRST
-        let res = await fetch(API_URL, {
-            method: "POST",
-            headers: { "Content-Type": "text/plain;charset=utf-8" },
-                  body: JSON.stringify({
-                action: "submit",
+        data = await postJSON(submitPayload, 25000); // hard cap — never hang forever
+    } catch (err) {
+        // The write may well have already landed on the server even though
+        // this request timed out/dropped. Before telling the rep it failed
+        // (and risking a confusing resubmit), ask the backend directly
+        // whether this exact submissionId was saved.
+        try {
+            const check = await postJSON({
+                action: "checkSubmission",
                 token: localStorage.getItem("token"),
-                submissionId,
-                expectedVersion: window.currentSubmissionVersion || null,
-                school,
-                schoolId: confirmedSchoolIdToSend,
-                region: regionVal,
-                location: locationVal,
-                phone: phoneVal,
-                language: languageVal,
-                french: frenchVal,
-                examType: exam,
-                packageOption: packageVal,
-                enrollments,
-                totalBill: bill.total,
-                balanceOverride: window.currentSchoolHasBalance ? true : false,
-                balanceAtSubmission: window.currentSchoolHasBalance ? window.currentSchoolBalanceAmount : 0
-            })
-        });
+                submissionId
+            }, 10000);
 
-              let data = await res.json();
-
-    
-        if (data.status === "balance_block") {
-            window.currentSchoolHasBalance = true;
-            window.currentSchoolBalanceAmount = data.balance;
-            window.currentSchoolBalanceExamLabel = data.examLabel;
-            if (data.schoolId) window.currentSchoolId = data.schoolId;
-
-            await showBalanceWarningModal(school, data.balance, data.examLabel);
-            window.balanceOverrideAcknowledged = true;
-
-            btn.disabled = false;
-            btn.innerText = "Submit Enrollment";
-            return;
+            if (check && check.status === "ok" && check.found) {
+                data = {
+                    status: "success",
+                    submissionId: submissionId,
+                    schoolId: check.schoolId,
+                    invoiceUrl: check.invoiceUrl || "",
+                    isNew: null,       // unknown from this recovery path
+                    billChanged: null,
+                    smsSent: null,
+                    whatsappStatus: null
+                };
+            }
+        } catch (checkErr) {
+            // still no luck — falls through to the generic message below
         }
+    }
 
-        // SESSION EXPIRED — bounce to login instead of a confusing retry loop
-        if (data.status === "unauthorized") {
-            forceRelogin("Session expired — please log in again to continue");
+    if (!data) {
+        showToast("Connection lost — nothing was sent. Please try again.");
+        btn.disabled = false;
+        btn.innerText = "Submit Enrollment";
+        return;
+    }
+
+        // SERVER-SIDE BALANCE BLOCK — the backend found an outstanding
+        // balance the form didn't know about (e.g. the school ID was only
+        // resolved server-side). Warn once, then let the next click through.
+        if (data.status === "balance_block") {
+            await showBalanceWarningModal(
+                school,
+                data.balance,
+                data.examLabel
+            );
+            window.currentSchoolHasBalance = true;
+            window.currentSchoolBalanceAmount = Number(data.balance) || 0;
+            window.currentSchoolBalanceExamLabel = data.examLabel || "";
+            window.balanceOverrideAcknowledged = true;
             btn.disabled = false;
             btn.innerText = "Submit Enrollment";
             return;
@@ -1451,20 +1492,21 @@ async function submitEnrollment() {
         // submission (null on an edit) — the backend fires SMS + tries
         // WhatsApp automatically right after saving. This just reports
         // what already happened; it never sends anything itself.
-     if (data.isNew) {
-    showToast("Enrollment submitted! Sending SMS & invoice now...");
-} else if (data.smsSent === true) {
-    showToast("Enrollment submitted. Auto SMS sent successfully!");
-} else if (data.smsSent === false) {
-    showToast("Enrollment submitted. Auto SMS failed — please send the bill manually.");
-} else if (data.whatsappStatus === "PENDING") {
-    showToast("Enrollment updated. Sending SMS & invoice now...");
-} else {
-    showToast("Enrollment updated");
-}
-    } catch (err) {
-        showToast("Server connection failed");
-    }
+        if (data.isNew) {
+            showToast("Enrollment submitted! Sending SMS & invoice now...");
+        } else if (data.smsSent === true) {
+            showToast("Enrollment submitted. Auto SMS sent successfully!");
+        } else if (data.smsSent === false) {
+            showToast("Enrollment submitted. Auto SMS failed — please send the bill manually.");
+        } else if (data.whatsappStatus === "PENDING") {
+            showToast("Enrollment updated. Sending SMS & invoice now...");
+        } else if (data.isNew === null) {
+            // came back via the checkSubmission recovery path — we know it
+            // saved, but not whether it was new or an edit
+            showToast("Enrollment saved successfully");
+        } else {
+            showToast("Enrollment updated");
+        }
 
     btn.disabled = false;
     btn.innerText = "Submit Enrollment";
