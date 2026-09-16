@@ -1853,7 +1853,7 @@ if(file && navigator.canShare && navigator.canShare({ files: [file] })){
 if(!file){
     showToast("Invoice is still being prepared — give it a few seconds and tap again.");
 } else {
-    showToast("This device can't attach files directly — opening the PDF so you can attach it.");
+    showToast("This device can't attach files directly opening the PDF so you can attach it.");
     if(ds.invoiceUrl) window.open(ds.invoiceUrl, "_blank");
 }
 
@@ -1926,7 +1926,7 @@ try{
   // fall through to the link-based fallback below
 }
 
-showToast("Couldn't attach the invoice directly on this device — opening WhatsApp with the bill details instead.");
+showToast("Couldn't attach the invoice directly on this device opening WhatsApp with the bill details instead.");
 window.open(`https://wa.me/?text=${encodeURIComponent(message)}`);
 }
 
