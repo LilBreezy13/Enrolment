@@ -1350,8 +1350,24 @@ async function submitEnrollment() {
 
         // EDITING AN EXISTING RECORD BUT NOTHING ACTUALLY CHANGED — this is
         // not a failure, so don't tell the rep it wasn't saved.
-        if (data.status === "no_change") {
-            showToast("No changes to save");
+             if (data.status === "no_change") {
+            showToast("Already saved — this registration already went through");
+            btn.disabled = false;
+            btn.innerText = "Submit Enrollment";
+            return;
+        }
+
+        // SAME SCHOOL, SAME DETAILS ALREADY REGISTERED under a different
+        // submission (a genuine re-entry, or a resubmit that picked up a new
+        // submissionId after a dropped network reply) — reassure, don't
+        // create a second row.
+        if (data.status === "duplicate") {
+            showToast("School already registered");
+            const summaryText = document.getElementById("summaryText");
+            if (summaryText && data.invoiceUrl) {
+                summaryText.dataset.invoiceUrl = data.invoiceUrl;
+                summaryText.dataset.submissionId = data.submissionId || "";
+            }
             btn.disabled = false;
             btn.innerText = "Submit Enrollment";
             return;
